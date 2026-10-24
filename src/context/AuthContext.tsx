@@ -189,6 +189,34 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => { mounted = false; subscription?.unsubscribe(); };
   }, []);
 
+  useEffect(() => {
+    if (!supabase || user?.role !== 'teacher') return;
+    let active = true;
+    void (async () => {
+      const { data, error } = await supabase!.from('teacher_roster_view').select('*');
+      if (error) {
+        console.error('Could not load teacher roster:', error.message);
+        return;
+      }
+      if (!active || !data) return;
+      const rows = data as any[];
+      setStudentRoster(rows.map(row => ({
+        id: String(row.student_id || row.id),
+        name: row.name || row.nickname || row.email || 'Student',
+        email: row.email || '',
+        grade: row.grade_track || row.grade || 'Student',
+        coins: Number(row.coins || 0),
+        totalSolved: Number(row.total_solved || row.total_questions || 0),
+        totalCorrect: Number(row.total_correct || row.correct_answers || 0),
+        accuracy: Number(row.accuracy ?? (row.total_solved ? Math.round(Number(row.total_correct || 0) / Number(row.total_solved) * 100) : 0)),
+        bestStreak: Number(row.best_streak || 0),
+        equippedCharacterId: row.equipped_character_id || 'rookie-champ',
+        lastActive: row.updated_at ? new Date(row.updated_at).toLocaleString() : 'Recently'
+      })));
+    })();
+    return () => { active = false; };
+  }, [user?.role]);
+
   const saveUser = (updated: UserAccount) => {
     setUser(updated);
     try {
