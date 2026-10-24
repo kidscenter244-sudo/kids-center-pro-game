@@ -19,7 +19,7 @@ import {
 import confetti from 'canvas-confetti';
 
 export const TeacherPortal: React.FC = () => {
-  const { isTeacher, teacherLogin, studentRoster, awardStudentCoins } = useAuth();
+  const { isTeacher, teacherLogin, studentRoster, loadTeacherRoster, awardStudentCoins } = useAuth();
 
   const [passcode, setPasscode] = useState('');
   const [loginError, setLoginError] = useState('');
@@ -29,7 +29,7 @@ export const TeacherPortal: React.FC = () => {
   const [bonusAmount, setBonusAmount] = useState(100);
   const [rewardMsg, setRewardMsg] = useState('');
 
-  const handleTeacherSubmit = (e: React.FormEvent) => {
+  const handleTeacherSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     sounds.playKeyClick();
     const res = teacherLogin(passcode);
@@ -38,6 +38,8 @@ export const TeacherPortal: React.FC = () => {
     } else {
       setLoginError('');
       sounds.playUnlock();
+      const rosterResult = await loadTeacherRoster(passcode);
+      if (!rosterResult.success) setRewardMsg(`Roster error: ${rosterResult.message}`);
     }
   };
 
@@ -122,9 +124,9 @@ export const TeacherPortal: React.FC = () => {
   });
 
   const totalClassSolved = studentRoster.reduce((acc, curr) => acc + curr.totalSolved, 0);
-  const avgAccuracy = Math.round(
-    studentRoster.reduce((acc, curr) => acc + curr.accuracy, 0) / studentRoster.length
-  );
+  const avgAccuracy = studentRoster.length
+    ? Math.round(studentRoster.reduce((acc, curr) => acc + curr.accuracy, 0) / studentRoster.length)
+    : 0;
   const totalCoinsDistributed = studentRoster.reduce((acc, curr) => acc + curr.coins, 0);
 
   return (
