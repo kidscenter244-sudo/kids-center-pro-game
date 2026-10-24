@@ -23,7 +23,7 @@ interface AuthContextType {
   isAuthModalOpen: boolean;
   // Teacher roster actions
   studentRoster: StudentRosterRecord[];
-  awardStudentCoins: (studentId: string, amount: number) => void;
+  awardStudentCoins: (studentId: string, amount: number, teacherCode: string) => Promise<{ success: boolean; message: string }>;
 }
 
 const DEFAULT_USER: UserAccount = {
@@ -414,12 +414,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const awardStudentCoins = (studentId: string, amount: number) => {
+  const awardStudentCoins = async (studentId: string, amount: number, teacherCode: string): Promise<{ success: boolean; message: string }> => {
+    if (!supabase) return { success: false, message: 'Supabase is not configured.' };
+    const { data, error } = await supabase.functions.invoke('award-student-coins', {
+      body: { teacherCode, studentId }
+    });
+    if (error || !data?.success) {
+      console.error('Could not award student coins:', error || data);
+      return { success: false, message: data?.error || error?.message || 'Could not award coins.' };
+    }
     setStudentRoster(prev => {
-      const updated = prev.map(s => (s.id === studentId ? { ...s, coins: s.coins + amount } : s));
-      localStorage.setItem('kids_center_roster', JSON.stringify(updated));
+      const updated = prev.map(s => s.id === studentId ? { ...s, coins: Number(data.coins) } : s);
+      try { localStorage.setItem('kids_center_roster', JSON.stringify(updated)); } catch {}
       return updated;
     });
+    return { success: true, message: `Added ${data.awarded} coins. New balance: ${data.coins}.` };
   };
 
   return (
