@@ -1,14 +1,15 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { UserAccount, QuizSessionSummary, StudentRosterRecord } from '../types';
 import { CHARACTERS } from '../data/characters';
+import { supabase, isSupabaseConfigured } from '../lib/supabase';
 
 interface AuthContextType {
   user: UserAccount | null;
   isAuthenticated: boolean;
   isTeacher: boolean;
-  login: (email: string, pass: string) => { success: boolean; message: string };
+  login: (email: string, pass: string) => Promise<{ success: boolean; message: string }>;
   teacherLogin: (passcode: string) => { success: boolean; message: string };
-  register: (email: string, pass: string, nickname: string) => { success: boolean; message: string };
+  register: (email: string, pass: string, nickname: string) => Promise<{ success: boolean; message: string }>;
   loginGuest: () => void;
   logout: () => void;
   addCoins: (amount: number) => void;
@@ -130,32 +131,55 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [studentRoster, setStudentRoster] = useState<StudentRosterRecord[]>(INITIAL_STUDENTS);
 
-  // Initialize from localStorage
+  // Restore the Supabase session and its cloud profile on every device.
   useEffect(() => {
-    try {
-      const activeEmail = localStorage.getItem('kids_center_active_email');
-      if (activeEmail) {
-        const stored = localStorage.getItem(`kids_center_user_${activeEmail}`);
-        if (stored) {
-          setUser(JSON.parse(stored));
-        } else if (activeEmail === 'teacher@kidscenter.com') {
-          teacherLogin('01068545095');
-        } else {
-          setUser(DEFAULT_USER);
-        }
-      } else {
-        // If no active session, user is null so AuthGate displays first!
-        setUser(null);
+    let mounted = true;
+    const restore = async () => {
+      if (!supabase) {
+        const activeEmail = localStorage.getItem('kids_center_active_email');
+        const stored = activeEmail ? localStorage.getItem(`kids_center_user_${activeEmail}`) : null;
+        if (mounted && stored) { try { setUser(JSON.parse(stored)); } catch { setUser(null); } }
+        return;
       }
-
-      // Load roster
-      const storedRoster = localStorage.getItem('kids_center_roster');
-      if (storedRoster) {
-        setStudentRoster(JSON.parse(storedRoster));
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!mounted || !session?.user) { if (mounted) setUser(null); return; }
+      await loadCloudUser(session.user.id, session.user.email || '');
+    };
+    const loadCloudUser = async (id: string, email: string) => {
+      if (!supabase) return;
+      const { data: profile, error } = await supabase.from('profiles').select('*').eq('id', id).maybeSingle();
+      if (error) { console.error('Could not load Supabase profile:', error.message); return; }
+      if (!profile || !mounted) return;
+      const { data: characterRows } = await supabase.from('user_characters').select('character_id').eq('user_id', id);
+      const { data: sessions } = await supabase.from('quiz_sessions').select('*').eq('user_id', id).order('created_at', { ascending: false }).limit(20);
+      const history: QuizSessionSummary[] = (sessions || []).map((row: any) => row.session_data || row.summary || row).filter((row: any) => row && row.id && row.problems);
+      const next: UserAccount = {
+        email: profile.email || email,
+        nickname: profile.nickname || email.split('@')[0],
+        role: profile.role === 'teacher' ? 'teacher' : 'student',
+        coins: Number(profile.coins ?? 450),
+        unlockedCharacters: Array.from(new Set(['rookie-champ', ...(characterRows || []).map((row: any) => row.character_id).filter(Boolean)])),
+        equippedCharacterId: profile.equipped_character_id || 'rookie-champ',
+        stats: {
+          totalSolved: Number(profile.total_solved ?? 0),
+          totalCorrect: Number(profile.total_correct ?? 0),
+          totalCoinsEarned: Number(profile.total_coins_earned ?? profile.coins ?? 450),
+          bestStreak: Number(profile.best_streak ?? 0)
+        },
+        history
+      };
+      setUser(next);
+      try { localStorage.setItem(`kids_center_user_${next.email}`, JSON.stringify(next)); localStorage.setItem('kids_center_active_email', next.email); } catch {}
+      if (next.role === 'student') {
+        const { data: roster } = await supabase.from('profiles').select('id,email,nickname,grade_track,coins,total_solved,total_correct,best_streak,equipped_character_id,updated_at').eq('role','student').order('updated_at',{ascending:false}).limit(200);
+        if (mounted && roster) setStudentRoster(roster.map((row: any) => ({ id: row.id, email: row.email, name: row.nickname || row.email, grade: row.grade_track || 'Student', coins: Number(row.coins || 0), totalSolved: Number(row.total_solved || 0), totalCorrect: Number(row.total_correct || 0), accuracy: row.total_solved ? Math.round(row.total_correct / row.total_solved * 100) : 100, bestStreak: Number(row.best_streak || 0), equippedCharacterId: row.equipped_character_id || 'rookie-champ', lastActive: row.updated_at ? new Date(row.updated_at).toLocaleString() : 'Recently' })));
       }
-    } catch {
-      setUser(null);
-    }
+    };
+    restore();
+    const subscription = supabase?.auth.onAuthStateChange((_event, session) => {
+      if (!session?.user && mounted) setUser(null);
+    }).data.subscription;
+    return () => { mounted = false; subscription?.unsubscribe(); };
   }, []);
 
   const saveUser = (updated: UserAccount) => {
@@ -163,94 +187,60 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       localStorage.setItem(`kids_center_user_${updated.email}`, JSON.stringify(updated));
       localStorage.setItem('kids_center_active_email', updated.email);
-
-      // Keep roster updated with active student
-      if (updated.role === 'student') {
-        setStudentRoster(prev => {
-          const exists = prev.find(s => s.email === updated.email);
-          let newRoster: StudentRosterRecord[];
-          if (exists) {
-            newRoster = prev.map(s =>
-              s.email === updated.email
-                ? {
-                    ...s,
-                    coins: updated.coins,
-                    totalSolved: updated.stats.totalSolved,
-                    totalCorrect: updated.stats.totalCorrect,
-                    accuracy:
-                      updated.stats.totalSolved > 0
-                        ? Math.round((updated.stats.totalCorrect / updated.stats.totalSolved) * 100)
-                        : 100,
-                    bestStreak: updated.stats.bestStreak,
-                    equippedCharacterId: updated.equippedCharacterId,
-                    lastActive: 'Just now'
-                  }
-                : s
-            );
-          } else {
-            newRoster = [
-              {
-                id: `std-${Date.now()}`,
-                name: updated.nickname,
-                email: updated.email,
-                grade: 'Grade 5 - Active Player',
-                coins: updated.coins,
-                totalSolved: updated.stats.totalSolved,
-                totalCorrect: updated.stats.totalCorrect,
-                accuracy:
-                  updated.stats.totalSolved > 0
-                    ? Math.round((updated.stats.totalCorrect / updated.stats.totalSolved) * 100)
-                    : 100,
-                bestStreak: updated.stats.bestStreak,
-                equippedCharacterId: updated.equippedCharacterId,
-                lastActive: 'Just now'
-              },
-              ...prev
-            ];
-          }
-          localStorage.setItem('kids_center_roster', JSON.stringify(newRoster));
-          return newRoster;
-        });
-      }
-    } catch (e) {
-      console.error(e);
+    } catch {}
+    if (supabase && updated.email !== DEFAULT_USER.email && updated.role !== 'teacher') {
+      void (async () => {
+        const { data: { user: authUser } } = await supabase!.auth.getUser();
+        if (!authUser) return;
+        const { error } = await supabase!.from('profiles').upsert({
+          id: authUser.id, email: updated.email, nickname: updated.nickname, role: updated.role,
+          coins: updated.coins, total_solved: updated.stats.totalSolved, total_correct: updated.stats.totalCorrect,
+          total_coins_earned: updated.stats.totalCoinsEarned, best_streak: updated.stats.bestStreak,
+          equipped_character_id: updated.equippedCharacterId, updated_at: new Date().toISOString()
+        }, { onConflict: 'id' });
+        if (error) console.error('Could not save profile to Supabase:', error.message);
+      })();
+    }
+    if (updated.role === 'student') {
+      setStudentRoster(prev => {
+        const record: StudentRosterRecord = {
+          id: `local-${updated.email}`, name: updated.nickname, email: updated.email, grade: 'Student',
+          coins: updated.coins, totalSolved: updated.stats.totalSolved, totalCorrect: updated.stats.totalCorrect,
+          accuracy: updated.stats.totalSolved ? Math.round(updated.stats.totalCorrect / updated.stats.totalSolved * 100) : 100,
+          bestStreak: updated.stats.bestStreak, equippedCharacterId: updated.equippedCharacterId, lastActive: 'Just now'
+        };
+        const next = prev.some(item => item.email === updated.email)
+          ? prev.map(item => item.email === updated.email ? { ...item, ...record } : item)
+          : [record, ...prev];
+        try { localStorage.setItem('kids_center_roster', JSON.stringify(next)); } catch {}
+        return next;
+      });
     }
   };
 
-  const login = (email: string, pass: string): { success: boolean; message: string } => {
+  const login = async (email: string, pass: string): Promise<{ success: boolean; message: string }> => {
     const cleanEmail = email.trim().toLowerCase();
-    if (!cleanEmail || !pass) {
-      return { success: false, message: 'Please enter both email and password.' };
-    }
-
-    try {
-      const accountsJson = localStorage.getItem('kids_center_passwords');
-      const accounts: Record<string, string> = accountsJson ? JSON.parse(accountsJson) : {};
-
-      if (!accounts[cleanEmail]) {
-        return { success: false, message: 'Account not found. Please register first!' };
-      }
-
-      if (accounts[cleanEmail] !== pass) {
-        return { success: false, message: 'Incorrect password.' };
-      }
-
-      const stored = localStorage.getItem(`kids_center_user_${cleanEmail}`);
-      if (stored) {
-        saveUser(JSON.parse(stored));
-      } else {
-        const newProfile: UserAccount = {
-          ...DEFAULT_USER,
-          email: cleanEmail,
-          nickname: cleanEmail.split('@')[0]
-        };
-        saveUser(newProfile);
-      }
-      setIsAuthModalOpen(false);
-      return { success: true, message: `Welcome back, ${cleanEmail}!` };
-    } catch {
-      return { success: false, message: 'Login error.' };
-    }
+    if (!cleanEmail || !pass) return { success: false, message: 'Please enter both email and password.' };
+    if (!supabase) return { success: false, message: 'Supabase is not configured. Check VITE_SUPABASE_URL and the public key in Vercel.' };
+    const { data, error } = await supabase.auth.signInWithPassword({ email: cleanEmail, password: pass });
+    if (error || !data.user) return { success: false, message: error?.message || 'Login failed.' };
+    const { data: profile, error: profileError } = await supabase.from('profiles').select('*').eq('id', data.user.id).maybeSingle();
+    if (profileError) return { success: false, message: 'Signed in, but could not load profile: ' + profileError.message };
+    if (!profile) return { success: false, message: 'Account profile is missing. Check the profiles table and handle_new_user trigger.' };
+    const { data: characters } = await supabase.from('user_characters').select('character_id').eq('user_id', data.user.id);
+    const { data: sessions } = await supabase.from('quiz_sessions').select('*').eq('user_id', data.user.id).order('created_at', { ascending: false }).limit(20);
+    const history: QuizSessionSummary[] = (sessions || []).map((row: any) => row.session_data || row.summary || row).filter((row: any) => row && row.id && row.problems);
+    const account: UserAccount = {
+      email: profile.email || cleanEmail, nickname: profile.nickname || cleanEmail.split('@')[0],
+      role: profile.role === 'teacher' ? 'teacher' : 'student', coins: Number(profile.coins ?? 450),
+      unlockedCharacters: Array.from(new Set(['rookie-champ', ...(characters || []).map((row: any) => row.character_id).filter(Boolean)])),
+      equippedCharacterId: profile.equipped_character_id || 'rookie-champ',
+      stats: { totalSolved: Number(profile.total_solved || 0), totalCorrect: Number(profile.total_correct || 0), totalCoinsEarned: Number(profile.total_coins_earned ?? profile.coins ?? 450), bestStreak: Number(profile.best_streak || 0) },
+      history
+    };
+    saveUser(account);
+    setIsAuthModalOpen(false);
+    return { success: true, message: `Welcome back, ${account.nickname}!` };
   };
 
   const teacherLogin = (passcode: string): { success: boolean; message: string } => {
@@ -278,48 +268,29 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return { success: false, message: 'Incorrect teacher passcode!' };
   };
 
-  const register = (email: string, pass: string, nickname: string): { success: boolean; message: string } => {
+  const register = async (email: string, pass: string, nickname: string): Promise<{ success: boolean; message: string }> => {
     const cleanEmail = email.trim().toLowerCase();
-    if (!cleanEmail || cleanEmail.indexOf('@') === -1) {
-      return { success: false, message: 'Please enter a valid email address.' };
-    }
-    if (!pass || pass.length < 4) {
-      return { success: false, message: 'Password must be at least 4 characters.' };
-    }
-
-    try {
-      const accountsJson = localStorage.getItem('kids_center_passwords');
-      const accounts: Record<string, string> = accountsJson ? JSON.parse(accountsJson) : {};
-
-      if (accounts[cleanEmail]) {
-        return { success: false, message: 'Account already exists. Please log in.' };
-      }
-
-      accounts[cleanEmail] = pass;
-      localStorage.setItem('kids_center_passwords', JSON.stringify(accounts));
-
-      const newProfile: UserAccount = {
-        email: cleanEmail,
-        nickname: nickname.trim() || cleanEmail.split('@')[0],
-        role: 'student',
-        coins: user ? Math.max(450, user.coins) : 450,
-        unlockedCharacters: ['rookie-champ'],
-        equippedCharacterId: 'rookie-champ',
-        stats: {
-          totalSolved: 0,
-          totalCorrect: 0,
-          totalCoinsEarned: 450,
-          bestStreak: 0
-        },
-        history: []
-      };
-
-      saveUser(newProfile);
-      setIsAuthModalOpen(false);
-      return { success: true, message: `Welcome, ${newProfile.nickname}!` };
-    } catch {
-      return { success: false, message: 'Registration failed.' };
-    }
+    if (!cleanEmail || !cleanEmail.includes('@')) return { success: false, message: 'Please enter a valid email address.' };
+    if (!pass || pass.length < 6) return { success: false, message: 'Password must be at least 6 characters.' };
+    if (!supabase) return { success: false, message: 'Supabase is not configured. Check Vercel environment variables.' };
+    const cleanNickname = nickname.trim() || cleanEmail.split('@')[0];
+    const { data, error } = await supabase.auth.signUp({
+      email: cleanEmail, password: pass, options: { data: { nickname: cleanNickname, role: 'student' } }
+    });
+    if (error) return { success: false, message: error.message };
+    if (!data.user) return { success: false, message: 'Registration could not be completed.' };
+    if (!data.session) return { success: true, message: 'Account created. Check your email to confirm it, then sign in.' };
+    const { data: profile, error: profileError } = await supabase.from('profiles').select('*').eq('id', data.user.id).maybeSingle();
+    if (profileError) return { success: false, message: 'Account created but profile could not be loaded: ' + profileError.message };
+    if (!profile) return { success: false, message: 'Account created. The profiles table/handle_new_user trigger must create the student profile before login.' };
+    const account: UserAccount = {
+      email: cleanEmail, nickname: profile.nickname || cleanNickname, role: 'student', coins: Number(profile.coins ?? 450),
+      unlockedCharacters: ['rookie-champ'], equippedCharacterId: profile.equipped_character_id || 'rookie-champ',
+      stats: { totalSolved: Number(profile.total_solved || 0), totalCorrect: Number(profile.total_correct || 0), totalCoinsEarned: Number(profile.total_coins_earned ?? 450), bestStreak: Number(profile.best_streak || 0) }, history: []
+    };
+    saveUser(account);
+    setIsAuthModalOpen(false);
+    return { success: true, message: `Welcome, ${account.nickname}!` };
   };
 
   const loginGuest = () => {
@@ -329,6 +300,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const logout = () => {
+    if (supabase) void supabase.auth.signOut();
     localStorage.removeItem('kids_center_active_email');
     localStorage.removeItem('kids_center_passed_gate');
     setUser(null);
@@ -372,6 +344,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const saveSession = (session: QuizSessionSummary) => {
     if (!user) return;
+    if (supabase && user.email !== DEFAULT_USER.email) {
+      void (async () => {
+        const { data: { user: authUser } } = await supabase!.auth.getUser();
+        if (authUser) {
+          const { error } = await supabase!.from('quiz_sessions').insert({ user_id: authUser.id, session_data: session, created_at: session.date || new Date().toISOString() });
+          if (error) console.error('Could not save quiz session:', error.message);
+        }
+      })();
+    }
     saveUser({
       ...user,
       coins: user.coins + session.coinsEarned,
