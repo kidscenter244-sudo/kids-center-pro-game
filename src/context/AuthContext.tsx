@@ -443,8 +443,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const awardStudentCoins = async (studentId: string, amount: number, teacherCode: string): Promise<{ success: boolean; message: string }> => {
     if (!supabase) return { success: false, message: 'Supabase is not configured.' };
     const { data, error } = await supabase.functions.invoke('award-student-coins', {
-      body: { teacherCode, studentId }
-    });
+body: { action: 'award-coins', teacherCode, studentId }    });
     if (error || !data?.success) {
       console.error('Could not award student coins:', error || data);
       return { success: false, message: data?.error || error?.message || 'Could not award coins.' };
