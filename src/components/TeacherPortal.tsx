@@ -41,9 +41,14 @@ export const TeacherPortal: React.FC = () => {
     }
   };
 
-  const handleAwardCoins = (studentId: string) => {
+  const handleAwardCoins = async (studentId: string) => {
     sounds.playKeyClick();
-    awardStudentCoins(studentId, bonusAmount);
+    setRewardMsg('Adding coins...');
+    const result = await awardStudentCoins(studentId, bonusAmount, passcode);
+    if (!result.success) {
+      setRewardMsg(`Failed: ${result.message}`);
+      return;
+    }
     sounds.playCoin();
     setRewardMsg(`Awarded +${bonusAmount} 🪙 coins to student!`);
     try {
