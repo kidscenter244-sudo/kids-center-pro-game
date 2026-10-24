@@ -152,7 +152,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!profile || !mounted) return;
       const { data: characterRows } = await supabase.from('user_characters').select('character_id').eq('user_id', id);
       const { data: sessions } = await supabase.from('quiz_sessions').select('*').eq('user_id', id).order('created_at', { ascending: false }).limit(20);
-      const history: QuizSessionSummary[] = (sessions || []).map((row: any) => row.session_data || row.summary || row).filter((row: any) => row && row.id && row.problems);
+      const history: QuizSessionSummary[] = (sessions || []).map((row: any) => ({
+        id: row.id, date: row.created_at, categoryTitle: row.category_title || 'Math Practice',
+        totalQuestions: Number(row.total_questions || 0), correctAnswers: Number(row.correct_answers || 0),
+        accuracy: Number(row.accuracy || 0), coinsEarned: Number(row.coins_earned || 0),
+        timeSpentSeconds: Number(row.time_spent_seconds || 0),
+        averageTimePerQuestion: row.total_questions ? Number(row.time_spent_seconds || 0) / Number(row.total_questions) : 0,
+        problems: []
+      }));
       const next: UserAccount = {
         email: profile.email || email,
         nickname: profile.nickname || email.split('@')[0],
@@ -163,7 +170,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         stats: {
           totalSolved: Number(profile.total_solved ?? 0),
           totalCorrect: Number(profile.total_correct ?? 0),
-          totalCoinsEarned: Number(profile.total_coins_earned ?? profile.coins ?? 450),
+          totalCoinsEarned: Number(profile.coins ?? 450),
           bestStreak: Number(profile.best_streak ?? 0)
         },
         history
@@ -195,7 +202,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const { error } = await supabase!.from('profiles').upsert({
           id: authUser.id, email: updated.email, nickname: updated.nickname, role: updated.role,
           coins: updated.coins, total_solved: updated.stats.totalSolved, total_correct: updated.stats.totalCorrect,
-          total_coins_earned: updated.stats.totalCoinsEarned, best_streak: updated.stats.bestStreak,
+          best_streak: updated.stats.bestStreak,
           equipped_character_id: updated.equippedCharacterId, updated_at: new Date().toISOString()
         }, { onConflict: 'id' });
         if (error) console.error('Could not save profile to Supabase:', error.message);
@@ -286,7 +293,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const account: UserAccount = {
       email: cleanEmail, nickname: profile.nickname || cleanNickname, role: 'student', coins: Number(profile.coins ?? 450),
       unlockedCharacters: ['rookie-champ'], equippedCharacterId: profile.equipped_character_id || 'rookie-champ',
-      stats: { totalSolved: Number(profile.total_solved || 0), totalCorrect: Number(profile.total_correct || 0), totalCoinsEarned: Number(profile.total_coins_earned ?? 450), bestStreak: Number(profile.best_streak || 0) }, history: []
+      stats: { totalSolved: Number(profile.total_solved || 0), totalCorrect: Number(profile.total_correct || 0), totalCoinsEarned: Number(profile.coins ?? 450), bestStreak: Number(profile.best_streak || 0) }, history: []
     };
     saveUser(account);
     setIsAuthModalOpen(false);
@@ -348,7 +355,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       void (async () => {
         const { data: { user: authUser } } = await supabase!.auth.getUser();
         if (authUser) {
-          const { error } = await supabase!.from('quiz_sessions').insert({ user_id: authUser.id, session_data: session, created_at: session.date || new Date().toISOString() });
+          const { error } = await supabase!.from('quiz_sessions').insert({
+            user_id: authUser.id, category_title: session.categoryTitle, total_questions: session.totalQuestions,
+            correct_answers: session.correctAnswers, accuracy: session.accuracy, coins_earned: session.coinsEarned,
+            time_spent_seconds: session.timeSpentSeconds, created_at: session.date || new Date().toISOString()
+          });
           if (error) console.error('Could not save quiz session:', error.message);
         }
       })();
