@@ -230,7 +230,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!cleanEmail || !pass) return { success: false, message: 'Please enter both email and password.' };
     if (!supabase) return { success: false, message: 'Supabase is not configured. Check VITE_SUPABASE_URL and the public key in Vercel.' };
     const { data, error } = await supabase.auth.signInWithPassword({ email: cleanEmail, password: pass });
-    if (error || !data.user) return { success: false, message: error?.message || 'Login failed.' };
+    if (error || !data.user) {
+      const authMessage = error?.message || 'Login failed.';
+      const lowerMessage = authMessage.toLowerCase();
+      if (lowerMessage.includes('email not confirmed')) {
+        return { success: false, message: 'This account needs email confirmation. To allow direct sign-in, the project owner must turn off Confirm email in Supabase Authentication settings.' };
+      }
+      if (lowerMessage.includes('invalid login credentials')) {
+        return { success: false, message: 'Email or password is incorrect, or this account has not been created in Supabase.' };
+      }
+      return { success: false, message: authMessage };
+    }
     const { data: profile, error: profileError } = await supabase.from('profiles').select('*').eq('id', data.user.id).maybeSingle();
     if (profileError) return { success: false, message: 'Signed in, but could not load profile: ' + profileError.message };
     if (!profile) return { success: false, message: 'Account profile is missing. Check the profiles table and handle_new_user trigger.' };
@@ -286,7 +296,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
     if (error) return { success: false, message: error.message };
     if (!data.user) return { success: false, message: 'Registration could not be completed.' };
-    if (!data.session) return { success: true, message: 'Account created. Check your email to confirm it, then sign in.' };
+    // Supabase returns no session when email confirmation is enabled. Do not
+    // pretend the student is signed in; direct registration requires Confirm email
+    // to be disabled in the Supabase project Auth settings.
+    if (!data.session) return {
+      success: false,
+      message: 'Supabase is still requiring email confirmation. Turn off Authentication → Sign In / Providers → Email → Confirm email in the Supabase dashboard, then try again.'
+    };
     const { data: profile, error: profileError } = await supabase.from('profiles').select('*').eq('id', data.user.id).maybeSingle();
     if (profileError) return { success: false, message: 'Account created but profile could not be loaded: ' + profileError.message };
     if (!profile) return { success: false, message: 'Account created. The profiles table/handle_new_user trigger must create the student profile before login.' };
